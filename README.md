@@ -1711,3 +1711,312 @@ func main() {
 	log.Fatal(http.ListenAndServe("localhost:8000",db))
 }
 ```
+
+# 在Go中使用并发
+学习目标：
+- Go中并发的工资原理
+- 并发与并行之间的差异
+- 如果在并发程序中使用channel（通道）进行通信
+- 如何通过并发编写运行速度更快的程序
+- 如果编写可以使用缓冲区来利用并发的动态程序
+
+## 了解goroutine(轻量线程)
+编写并发程序时最大的问题是在进程之间共享数据。 Go 采用不同于其他编程语言的通信方式，因为 Go 是通过 channel 来回传递数据的
+不是通过共享内存通信，而是通过通信共享内存
+
+### goroutine
+goroutine 是轻量线程中的并发活动，而不是在操作系统中进行的传统活动
+创建goroutine ，则必须在调用函数之前使用go关键字
+
+不适用goroutine来处理调试网站：
+```go
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"time"
+)
+
+func main() {
+	start := time.Now()
+
+	apis := []string{
+		"https://management.azure.com",
+		"https://dev.azure.com",
+		"https://api.github.com",
+		"https://outlook.office.com/",
+		"https://api.somewhereintheinternet.com/",
+		"https://graph.microsoft.com",
+	}
+
+	for _,api := range apis{
+		_,err := http.Get(api)
+		if err != nil{
+			fmt.Printf("Error:%s is down\n",err)
+			continue
+		}
+		fmt.Printf("Success:%s is up and running!\n",api)
+	}
+
+	elapsed := time.Since(start)
+	fmt.Printf("Done! It took %v seconds\n",elapsed)
+}
+```
+输出：
+```
+Success:https://management.azure.com is up and running!
+Success:https://dev.azure.com is up and running!
+Success:https://api.github.com is up and running!
+Success:https://outlook.office.com/ is up and running!
+Error:Get "https://api.somewhereintheinternet.com/": dial tcp: lookup api.somewhereintheinternet.com: no such host is down
+Success:https://graph.microsoft.com is up and running!
+Done! It took 8.380591s seconds
+```
+
+总花费时间接近8.5秒，将这个程序改成goroutine来处理：
+```go
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"time"
+)
+
+func main() {
+	start := time.Now()
+
+	apis := []string{
+		"https://management.azure.com",
+		"https://dev.azure.com",
+		"https://api.github.com",
+		"https://outlook.office.com/",
+		"https://api.somewhereintheinternet.com/",
+		"https://graph.microsoft.com",
+	}
+
+	for _,api := range apis{
+		go checkApi(api)
+	}
+	// 由于处理是在太快了 ，加上休眠2s来看输出结果
+	time.Sleep(time.Second * 2)
+	elapsed := time.Since(start)
+	fmt.Printf("Done! It took %v seconds\n",elapsed)
+}
+
+// 由于go关键字必须加在函数前面，将一些逻辑提出来成为一个函数
+func checkApi(api string){
+	_,err:= http.Get(api)
+	if err != nil{
+		fmt.Printf("Error:%s is down\n",err)
+		return
+	}
+	fmt.Printf("Success:%s is up and running!\n",api)
+}
+```
+花费时间：
+```
+Error:Get "https://api.somewhereintheinternet.com/": dial tcp: lookup api.somewhereintheinternet.com: no such host is down
+Success:https://dev.azure.com is up and running!
+Success:https://management.azure.com is up and running!
+Success:https://api.github.com is up and running!
+Success:https://graph.microsoft.com is up and running!
+Success:https://outlook.office.com/ is up and running!
+Done! It took 2.0086604s seconds
+```
+
+可以看出来，即使休眠了2s，总时间也只花费了2.0086s,也就是说程序只花费了0.0086s
+比之前不适用并发的程序速度提高了1000倍
+但是由于程序处理过快，如果不加休眠是输出是没有结果的，因此为了方便管理goroutine，引起了channel
+
+## 将channel 用作通信机制
+Go 中的 channel 是 goroutine 之间的通信机制
+当你需要将值从一个 goroutine 发送到另一个 goroutine 时，将使用 channel。
+
+### channel语法
+由于 channel 是发送和接收数据的通信机制，因此它也有类型之分，因此只能发送channel支持的数据类型
+除使用关键字 chan 作为 channel 的数据类型外，还需指定将通过 channel 传递的数据类型，如 int 类型。
+因此，chan int 便是 整数类型的通道，这两个一起用才能表示一种数据类型
+
+使用make创建通道
+```
+ch := make(chan int)
+```
+一个channel 具有两个操作，发送数据和接受数据。若要指定channel具有的操作类型，需要使用运算发 <- 。
+希望 channel 仅发送数据，则必须在 channel 之后使用 <- 运算符。 如果希望 channel 接收数据，则必须在 channel 之前使用 <- 运算符
+```
+ch <- x  //ch 发送通道，将x 通过通道ch 发送出去
+x <- ch // ch 接受通道， 通过通道ch 接受数据x
+```
+
+关闭通道：
+```
+close(ch)
+```
+
+### 使用channel 修改网站调式程序
+```go
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"time"
+)
+
+func main() {
+	start := time.Now()
+	ch := make(chan string)
+
+	apis := []string{
+		"https://management.azure.com",
+		"https://dev.azure.com",
+		"https://api.github.com",
+		"https://outlook.office.com/",
+		"https://api.somewhereintheinternet.com/",
+		"https://graph.microsoft.com",
+	}
+	for _,api := range apis{
+		go checkApi(api,ch)
+	}
+	// 输出 通道中的数据
+	fmt.Print(<- ch)
+	end := time.Since(start)
+	fmt.Printf("Done! It took %v seconds\n",end)
+}
+
+func checkApi(api string,ch chan string){
+	_,err := http.Get(api)
+	if err != nil{
+		// 将格式化的诗句发送给ch通道
+		ch <- fmt.Sprintf("ERROR:%s is down\n",api)
+		return
+	}
+	ch <- fmt.Sprintf("SUCCESS:%s is up and running!\n",api)
+}
+```
+输出:
+```
+SUCCESS:https://management.azure.com is up and running!
+Done! It took 597.5514ms seconds
+```
+不加休眠函数，也可以看到输出，但是只能看到其中一个 goroutine 的输出，而我们共创建了五个 goroutine。
+这是因为make函数默认创建一个无缓冲区的channel,无缓冲区的channel会阻止发送行为，直到有人准备好接收数据
+因此可以说发送和接受都是阻止操作，会中断程序执行
+### 无缓冲区的channel
+在程序中:
+```
+fmt.Print(<- ch)
+```
+我们可以说 fmt.Print(<-ch) 会阻止程序，因为它从 channel 读取，并等待一些数据到达。
+一旦有任何数据到达，它就会继续下一行，然后程序完成。
+其他 goroutine 发生了什么？ 它们仍在运行，但都没有在侦听。 而且，由于程序提前完成，一些 goroutine 无法发送数据。
+因此可以说，发送通道和接受通道是一一对应关系，一个发送通道中ch发送数据就会等到 接收通道中ch接受数据，类似与通道的两端
+这类似与ES7中的 async 和 await 关键字。
+
+如果我们加一行 fmt.print(<- ch) :
+```
+// 输出 通道中的数据
+fmt.Print(<- ch)
+fmt.Print(<- ch)
+```
+会看到输出多了一行：
+```
+ERROR:https://api.somewhereintheinternet.com/ is down
+SUCCESS:https://management.azure.com is up and running!
+```
+因此，为了正确看到输出，就必须确定goroutine的数量，修改后的程序为：
+```go
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"time"
+)
+
+func main() {
+	start := time.Now()
+	ch := make(chan string)
+
+	apis := []string{
+		"https://management.azure.com",
+		"https://dev.azure.com",
+		"https://api.github.com",
+		"https://outlook.office.com/",
+		"https://api.somewhereintheinternet.com/",
+		"https://graph.microsoft.com",
+	}
+	for _,api := range apis{
+		go checkApi(api,ch)
+	}
+	// 输出 通道中的数据
+	// 修改后的部分，确定与发送通道相比配的接受通道
+	for i:=0;i<len(apis);i++{
+		fmt.Print(<- ch)
+	}
+
+	end := time.Since(start)
+	fmt.Printf("Done! It took %v seconds\n",end)
+}
+
+func checkApi(api string,ch chan string){
+	_,err := http.Get(api)
+	if err != nil{
+		// 将格式化的诗句发送给ch通道
+		ch <- fmt.Sprintf("ERROR:%s is down\n",api)
+		return
+	}
+	ch <- fmt.Sprintf("SUCCESS:%s is up and running!\n",api)
+}
+```
+
+输出：
+```
+SUCCESS:https://management.azure.com is up and running!
+SUCCESS:https://api.github.com is up and running!
+SUCCESS:https://graph.microsoft.com is up and running!
+SUCCESS:https://outlook.office.com/ is up and running!
+ERROR:https://api.somewhereintheinternet.com/ is down
+SUCCESS:https://dev.azure.com is up and running!
+Done! It took 3.0608742s seconds
+```
+将输出结果与apis切片比对一下，可以发现，输出的内容顺序不是原来的顺序了，如果多次运行此程序会发现，基本上每次顺序都不一样。
+这是因为无缓冲区的channel是同步操作的，它们保证每次发送数据时，程序都会被阻止，直到有人从 channel 中读取数据。
+
+### 有缓冲区的channel
+语法：
+```
+ch := make(chan string, 10)
+```
+
+### 指定channel方向
+Go 中 channel 的一个有趣特性是，在使用 channel 作为函数的参数时，可以指定 channel 是要发送数据还是接收数据
+语法：
+```
+chan<- int // 只能发送数据
+<-chan int // 只能接收数据
+```
+比如：
+```go
+package main
+
+import "fmt"
+
+func send(ch chan<- string,message string ){
+	fmt.Printf("Sending:%s\n",message)
+	ch <- message
+}
+
+func read(ch <-chan string){
+	fmt.Printf("Receiving:%v",<- ch)
+}
+
+func main() {
+	ch := make(chan string,1)
+	// 不能使用goroutine 因为send和read是有顺序的，使用go 关键字后就会出现顺序错误
+	send(ch,"Hello world")
+	read(ch)
+}
+```
